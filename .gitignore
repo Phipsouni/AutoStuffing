@@ -1,0 +1,28 @@
+# Локальные данные скрипта
+path.txt
+.requirements_installed
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Шаблон — свой файл кладите в templates (не коммитим личные таблицы)
+templates/*.xlsx
+templates/*.xlsm
+
+# Системные и редакторы
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Временные файлы Excel
+~$*
