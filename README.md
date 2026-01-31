@@ -9,11 +9,10 @@
 ```bash
 git clone https://github.com/YOUR_USERNAME/autostuffing.git
 cd autostuffing
-pip install -r requirements.txt
 ```
 
 1. Положите в папку **`templates/`** один файл-шаблон отгрузочной таблицы (`.xlsx` или `.xlsm`).
-2. Запустите скрипт и укажите рабочую папку (в ней — папки со счетами и/или подпапка `invoices/`):
+2. Запустите скрипт — при первом запуске он сам установит зависимости из `requirements.txt`. Укажите рабочую папку (в ней — папки со счетами и/или подпапка `invoices/`):
 
 ```bash
 python Autostuffing.py
