@@ -4,6 +4,7 @@ Autostuffing — сборка отгрузочных таблиц из папо�
 заполняет лист Total (счета, ЭСД, GTD).
 """
 
+import gc
 import re
 import shutil
 import subprocess
@@ -620,13 +621,14 @@ def process_application(
                 except Exception as e:
                     print(f"  Пропуск {path.name}: {e}")
         _fill_total_sheet(wb, inv_to_folder)
+        sorted_numbers = _get_sorted_invoice_numbers_from_wb(wb)
         wb.save(out_path)
         wb.close()
         if added:
             print(f"  {COLORS[1]}Готово: {out_path.name} (добавлено листов: {added}){RESET}")
         else:
             print(f"  {COLORS[0]}Готово: {out_path.name} (обновлены ЭСД/GTD на листе Total){RESET}")
-        return added, out_path
+        return added, out_path, sorted_numbers
     else:
         all_paths: list[tuple[Path, Path]] = []
         for folder in invoice_folders:
@@ -661,10 +663,11 @@ def process_application(
             except Exception as e:
                 print(f"  Пропуск {path.name}: {e}")
         _fill_total_sheet(wb, inv_to_folder)
+        sorted_numbers = _get_sorted_invoice_numbers_from_wb(wb)
         wb.save(out_path)
         wb.close()
         print(f"  {COLORS[1]}Готово: {out_path}{RESET}")
-        return copied, out_path
+        return copied, out_path, sorted_numbers
 
 
 # =============================================================================
@@ -711,21 +714,21 @@ def main():
 
     output_dir = root
 
-    # Обработка приложений; список файлов для опционального переименования (диапазон в имя)
+    # Обработка приложений; список для опционального переименования (с номерами — без повторного открытия)
     total_processed = 0
-    rename_list: list[tuple[Path, str, str]] = []  # (out_path, template_name, first_folder_name)
+    rename_list: list[tuple[Path, str, str, list[str]]] = []  # (out_path, template_name, first_folder_name, numbers)
     for i, (app_name, folders) in enumerate(by_app.items()):
         app_color = COLORS[i % len(COLORS)]
         print(f"\n  {app_color}─── Приложение: {app_name} ───{RESET}")
         try:
-            count, out_path = process_application(
+            count, out_path, sorted_numbers = process_application(
                 app_name,
                 folders,
                 template_path,
                 output_dir,
             )
             total_processed += count
-            rename_list.append((out_path, template_path.stem, folders[0].name))
+            rename_list.append((out_path, template_path.stem, folders[0].name, sorted_numbers))
         except Exception as e:
             print(f"  Ошибка: {e}")
 
@@ -750,6 +753,10 @@ def main():
     print(f"  Всего ДТ: {total_gtd:>4}")
     print("  " + "=" * 52)
 
+    # Перед выбором переименования — закрыть все хэндлы openpyxl (сборка мусора + пауза)
+    gc.collect()
+    time.sleep(0.3)
+
     # Выбор: закрыть без изменения имён или добавить диапазон счетов в имена
     while True:
         print(f"\n  {COLORS[4]}1 — закрыть без изменения имён файлов{RESET}")
@@ -759,14 +766,10 @@ def main():
             break
         if choice == "2":
             ext = template_path.suffix.lower()
-            keep_vba = ext == ".xlsm"
-            for out_path, template_name, first_folder_name in rename_list:
+            for out_path, template_name, first_folder_name, numbers in rename_list:
                 if not out_path.exists():
                     continue
                 try:
-                    wb = load_workbook(out_path, keep_vba=keep_vba)
-                    numbers = _get_sorted_invoice_numbers_from_wb(wb)
-                    wb.close()
                     long_base = build_upload_table_filename(
                         template_name, first_folder_name, numbers
                     )
@@ -775,6 +778,11 @@ def main():
                         continue
                     out_path.rename(new_path)
                     print(f"  {COLORS[1]}Переименовано: {out_path.name} → {new_path.name}{RESET}")
+                except OSError as e:
+                    if getattr(e, "winerror", None) == 32 or getattr(e, "errno", None) == 32:
+                        print(f"  {COLORS[2]}[ошибка] {out_path.name}: Файл открыт в другой программе (закройте в Excel){RESET}")
+                    else:
+                        print(f"  {COLORS[2]}[ошибка] {out_path.name}: {e}{RESET}")
                 except Exception as e:
                     print(f"  {COLORS[2]}[ошибка] {out_path.name}: {e}{RESET}")
             break
