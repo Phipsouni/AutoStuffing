@@ -1,10 +1,7 @@
 """
-Automation script for invoice processing.
-
-1. Analyzes invoice folder names in the given directory.
-2. Groups invoice folders by application (part after 3rd comma).
-3. For each application: copies template (xlsx or xlsm) to output, then copies
-   the first sheet from each xlsx invoice into that file. VBA не нужен — всё делает Python.
+Autostuffing — сборка отгрузочных таблиц из папок со счетами.
+Анализирует имена папок, группирует по приложению и товару, копирует листы из xlsx,
+заполняет лист Total (счета, ЭСД, GTD).
 """
 
 import re
@@ -16,16 +13,23 @@ from pathlib import Path
 from collections import defaultdict
 from copy import copy
 
-# --------------- CONFIG ---------------
-SCRIPT_DIR = Path(__file__).resolve().parent        # Папка, где лежит скрипт (templates — всегда рядом со скриптом)
+# =============================================================================
+# КОНФИГУРАЦИЯ — можно менять при масштабировании (другие папки, пути, имена)
+# =============================================================================
+SCRIPT_DIR = Path(__file__).resolve().parent        # Папка скрипта (templates рядом)
 REQUIREMENTS_FILE = SCRIPT_DIR / "requirements.txt"
 INSTALLED_MARKER = SCRIPT_DIR / ".requirements_installed"  # Есть = библиотеки уже ставили (не ставить повторно)
 INVOICE_SUBFOLDER = "invoices"                      # Подпапка со счетами (относительно введённой папки)
 TEMPLATE_SUBFOLDER = "templates"                    # Папка с шаблоном (xlsx или xlsm) — всегда в папке скрипта
 # Результаты сохраняются в рабочую папку (root), подпапка output не создаётся
-LAST_PATH_FILE = SCRIPT_DIR / "path.txt"  # Сохранённый путь для следующего запуска
+LAST_PATH_FILE = SCRIPT_DIR / "path.txt"  # Файл с последней рабочей папкой
 # -----------------------------------------------------------------------
 
+
+# =============================================================================
+# УСТАНОВКА ЗАВИСИМОСТЕЙ — при первом запуске pip install -r requirements.txt
+# При масштабировании: сменить REQUIREMENTS_FILE / INSTALLED_MARKER
+# =============================================================================
 
 def _ensure_requirements_installed() -> None:
     """При первом запуске ставит библиотеки из requirements.txt; при следующих — ничего не делает."""
@@ -52,7 +56,11 @@ try:
 except ImportError:
     raise ImportError("Установите openpyxl: pip install openpyxl")
 
-# Светлые цвета для чёрного фона консоли (ANSI)
+# =============================================================================
+# ЦВЕТА И КОНСОЛЬ — ANSI-коды для вывода в терминал Windows
+# При масштабировании: добавить свои COLORS, поменять _PATH_COLOR
+# =============================================================================
+
 COLORS = [
     "\033[92m",   # светло-зелёный
     "\033[96m",   # светло-голубой
@@ -95,8 +103,13 @@ def _load_last_path() -> Path | None:
     return None
 
 
-# Жёлтый для отображения текущего пути (индекс 2 в COLORS)
-_PATH_COLOR = "\033[93m"
+_PATH_COLOR = "\033[93m"  # Жёлтый для текущего пути
+
+
+# =============================================================================
+# РАБОЧАЯ ПАПКА — запрос пути, сохранение в path.txt
+# При масштабировании: сменить LAST_PATH_FILE, логику ask_work_directory
+# =============================================================================
 
 def ask_work_directory() -> Path:
     """
@@ -120,10 +133,47 @@ def ask_work_directory() -> Path:
     return path
 
 
+# =============================================================================
+# ГРУППИРОВКА ПАПОК — приложение (после 3-й запятой), порода/товар (части 4, 5)
+# "N pack" игнорируется; "spr 16 pack" → "spr"
+# При масштабировании: поменять get_group_key (части 3,4,5), паттерны _PACK_*
+# =============================================================================
+
 def get_application_name(folder_name: str) -> str:
-    """Имя приложения = 4-я часть имени папки (после 3-й запятой)."""
+    """Имя приложения = 4-я часть (после 3-й запятой)."""
     parts = parse_name_by_commas(folder_name)
     return parts[3] if len(parts) > 3 else folder_name
+
+
+_PACK_PATTERN = re.compile(r"^\d+\s*pack$", re.IGNORECASE)
+# Убирает " N pack" с конца (spr 16 pack → spr)
+_PACK_SUFFIX_PATTERN = re.compile(r"\s+\d+\s*pack\s*$", re.IGNORECASE)
+
+
+def _strip_pack_suffix(s: str) -> str:
+    """Убирает ' N pack' с конца строки (spr 16 pack → spr)."""
+    if not s:
+        return s
+    return _PACK_SUFFIX_PATTERN.sub("", s).strip()
+
+
+def get_group_key(folder_name: str) -> str:
+    """
+    Ключ группировки: приложение (после 3-й запятой) + части 4 и 5 (порода/товар).
+    "spr 16 pack" → "spr"; не создавать отдельную таблицу под "N pack".
+    """
+    parts = parse_name_by_commas(folder_name)
+    if len(parts) < 3:
+        return ""
+    app = parts[3] if len(parts) > 3 else folder_name
+    key_parts = [app]
+    if len(parts) > 4:
+        key_parts.append(parts[4].strip())
+    if len(parts) > 5:
+        product = _strip_pack_suffix(parts[5].strip())
+        if product and not _PACK_PATTERN.match(product):
+            key_parts.append(product)
+    return " | ".join(key_parts)
 
 
 def parse_name_by_commas(name: str) -> list[str]:
@@ -160,6 +210,11 @@ def _invoice_numbers_to_range_string(numbers: list[str]) -> str:
     return "(" + ";".join(parts) + ")"
 
 
+# =============================================================================
+# ИМЯ ОТГРУЗОЧНОЙ ТАБЛИЦЫ — диапазон счетов, части из папки; "N pack" убирается
+# При масштабировании: parse_name_by_commas, _invoice_numbers_to_range_string, формат имени
+# =============================================================================
+
 def build_upload_table_filename(
     template_name: str,
     invoice_folder_name: str,
@@ -172,7 +227,15 @@ def build_upload_table_filename(
     Пример: "(43;93;95-97;100) 6 pcs., LI, 40_2023, Add. VP-CH-2510-23, ZLPK (TS), pine"
     """
     t_parts = parse_name_by_commas(template_name)
-    i_parts = parse_name_by_commas(invoice_folder_name)
+    # "N pack" не попадает в имя; "spr 16 pack" → "spr"
+    i_parts = []
+    for p in parse_name_by_commas(invoice_folder_name):
+        p = p.strip()
+        if _PACK_PATTERN.match(p):  # отдельная часть "13 pack" — пропускаем
+            continue
+        p = _strip_pack_suffix(p)  # "spr 16 pack" → "spr"
+        if p:
+            i_parts.append(p)
     if invoice_numbers:
         range_str = _invoice_numbers_to_range_string(invoice_numbers)
         count = len(invoice_numbers)
@@ -185,6 +248,12 @@ def build_upload_table_filename(
     raw = ", ".join(name_parts)
     return re.sub(r'[\\/:*?"<>|]', "_", raw).strip(",_") or "upload_table"
 
+
+# =============================================================================
+# КОПИРОВАНИЕ ЛИСТОВ — ячейки, формат, ширина столбцов, область печати
+# Все столбцы/строки видимы, масштаб 25%
+# При масштабировании: _SHEET_ZOOM_PERCENT, _copy_sheet_print_and_view, _copy_cell_style
+# =============================================================================
 
 def _copy_cell_style(src_cell, tgt_cell) -> None:
     """Копирует значение и оформление ячейки (между книгами). Формулы копируются как формулы."""
@@ -217,32 +286,28 @@ def _copy_sheet_print_and_view(ws_src, ws_tgt) -> None:
             ws_tgt.page_setup = copy(ws_src.page_setup)
         if getattr(ws_src, "print_options", None) and ws_src.print_options is not None:
             ws_tgt.print_options = copy(ws_src.print_options)
-        # sheet_view нельзя присваивать целиком (в openpyxl нет setter), копируем только zoom и режим ниже
-        if getattr(ws_src, "views", None) and ws_src.views is not None:
-            ws_tgt.views = copy(ws_src.views)
+        # views не копируем — там может быть скрытие столбцов/строк
         if getattr(ws_src, "freeze_panes", None) is not None:
             ws_tgt.freeze_panes = ws_src.freeze_panes
-        # Масштаб листа (zoom) — копируем из источника, чтобы был такой же, как в счёте
-        _copy_sheet_zoom(ws_src, ws_tgt)
+        # Масштаб листа — 25%, чтобы весь лист был виден
+        _set_sheet_zoom_25(ws_tgt)
     except Exception as e:
         print(f"  [ошибка] настройки листа: {e}")
 
 
-def _copy_sheet_zoom(ws_src, ws_tgt) -> None:
-    """Копирует масштаб (zoom) листа из источника в целевой лист."""
+# Масштаб по умолчанию для скопированных листов (весь лист виден)
+_SHEET_ZOOM_PERCENT = 25
+
+
+def _set_sheet_zoom_25(ws_tgt) -> None:
+    """Устанавливает масштаб 25% на листе, чтобы весь лист был виден."""
     try:
-        sv_src = getattr(ws_src, "sheet_view", None)
-        sv_tgt = getattr(ws_tgt, "sheet_view", None)
-        if sv_src is None or sv_tgt is None:
+        sv = getattr(ws_tgt, "sheet_view", None)
+        if sv is None:
             return
-        if getattr(sv_src, "zoomScale", None) is not None:
-            sv_tgt.zoomScale = sv_src.zoomScale
-        if getattr(sv_src, "zoomScaleNormal", None) is not None:
-            sv_tgt.zoomScaleNormal = sv_src.zoomScaleNormal
-        if getattr(sv_src, "zoomScaleSheetLayoutView", None) is not None:
-            sv_tgt.zoomScaleSheetLayoutView = sv_src.zoomScaleSheetLayoutView
-        if getattr(sv_src, "zoomScalePageLayoutView", None) is not None:
-            sv_tgt.zoomScalePageLayoutView = sv_src.zoomScalePageLayoutView
+        sv.zoomScale = _SHEET_ZOOM_PERCENT
+        if hasattr(sv, "zoomScaleNormal"):
+            sv.zoomScaleNormal = _SHEET_ZOOM_PERCENT
     except Exception as e:
         print(f"  [ошибка] масштаб листа: {e}")
 
@@ -277,7 +342,7 @@ def copy_first_sheet_to_workbook(
             src_c = ws_src.cell(row=row, column=col)
             tgt_c = ws_tgt.cell(row=row, column=col)
             _copy_cell_style(src_c, tgt_c)
-    # Ширина столбцов — копируем все размеры; учитываем диапазоны (min/max), чтобы столбец O и др. не теряли ширину
+    # Ширина столбцов — копируем размеры, скрытие НЕ копируем (все столбцы видимы)
     for col_key, src_dim in list(ws_src.column_dimensions.items()):
         if src_dim is None or getattr(src_dim, "width", None) is None:
             continue
@@ -286,30 +351,42 @@ def copy_first_sheet_to_workbook(
         max_col = getattr(src_dim, "max", None)
         if min_col is not None and max_col is not None:
             for c in range(min_col, max_col + 1):
-                ws_tgt.column_dimensions[get_column_letter(c)].width = w
+                col_letter = get_column_letter(c)
+                ws_tgt.column_dimensions[col_letter].width = w
+                ws_tgt.column_dimensions[col_letter].hidden = False
         else:
             col_letter = get_column_letter(col_key) if isinstance(col_key, int) else str(col_key)
             ws_tgt.column_dimensions[col_letter].width = w
-    # Высота строк — копируем все размеры из источника
+            ws_tgt.column_dimensions[col_letter].hidden = False
+    # Высота строк — копируем размеры, скрытие НЕ копируем (все строки видимы)
     for row_key, src_dim in list(ws_src.row_dimensions.items()):
         if src_dim is not None and getattr(src_dim, "height", None) is not None:
             ws_tgt.row_dimensions[row_key].height = src_dim.height
+            ws_tgt.row_dimensions[row_key].hidden = False
     for merged in ws_src.merged_cells.ranges:
         ws_tgt.merge_cells(str(merged))
+    # Снимаем скрытие со всех столбцов и строк — как в счёте, но всё видно
+    for c in range(1, ws_src.max_column + 1):
+        ws_tgt.column_dimensions[get_column_letter(c)].hidden = False
+    for row_key in list(ws_tgt.row_dimensions):
+        ws_tgt.row_dimensions[row_key].hidden = False
     _copy_sheet_print_and_view(ws_src, ws_tgt)
-    # Режим просмотра «Страничный режим» (Page Break Preview) — как на вкладке «Вид»
+    # Режим просмотра «Страничный режим» (Page Break Preview) + масштаб 25%
     try:
         ws_tgt.sheet_view.view = "pageBreakPreview"
-        _copy_sheet_zoom(ws_src, ws_tgt)
+        _set_sheet_zoom_25(ws_tgt)
     except Exception:
         pass
     wb_src.close()
 
 
-# Регулярные выражения для ЭСД и GTD
+# =============================================================================
+# ЭСД И GTD — PDF в папках счетов: ЭСД — любой PDF, GTD — GTD_a_b_c.pdf
+# При масштабировании: _ESD_PATTERN, _GTD_PATTERN, _COL_ESD, _COL_GTD, _SKIP_SHEET_TITLES
+# =============================================================================
+
 _ESD_PATTERN = re.compile(r"^([\w-]+)\.pdf$", re.IGNORECASE)
 _GTD_PATTERN = re.compile(r"^GTD_(\d+)_(\d+)_(\d+)\.pdf$", re.IGNORECASE)
-
 # Колонки на листе Total: J = ЭСД, O = декларации (GTD)
 _COL_ESD = 10   # J
 _COL_GTD = 15   # O
@@ -447,24 +524,36 @@ def _count_esd_gtd_in_folders(folders: list[Path]) -> tuple[int, int]:
     return esd_count, gtd_count
 
 
+# =============================================================================
+# АНАЛИЗ ПАПОК — сканирование, группировка по get_group_key
+# При масштабировании: мин. число частей (3), get_group_key
+# =============================================================================
+
 def analyze_and_group_invoice_folders(base_path: Path) -> dict[str, list[Path]]:
     """
-    Сканирует папки со счетами, группирует по приложению (часть после 3-й запятой).
-    Учитываются только папки, в имени которых не меньше 3 частей (после 2-й запятой есть данные),
-    иначе не создавать лишние таблицы вроде "() pcs._LI".
+    Сканирует папки со счетами, группирует по приложению + тип (приложение = часть после 3-й запятой,
+    тип = последняя часть). Пример: "..., WPCH 0906, Demand" и "..., WPCH 0906, PORODA Pine" — разные таблицы.
+    Учитываются только папки с не менее чем 3 частями в имени.
     """
     if not base_path.is_dir():
         return {}
-    by_app = defaultdict(list)
+    by_group = defaultdict(list)
     for item in base_path.iterdir():
         if item.is_dir() and not item.name.startswith("."):
             parts = parse_name_by_commas(item.name)
             if len(parts) < 3:
                 continue
-            app_name = get_application_name(item.name)
-            by_app[app_name].append(item)
-    return dict(by_app)
+            key = get_group_key(item.name)
+            if not key:
+                continue
+            by_group[key].append(item)
+    return dict(by_group)
 
+
+# =============================================================================
+# ОБРАБОТКА ГРУППЫ — создание/обновление отгрузочной таблицы, копирование листов
+# При масштабировании: build_upload_table_filename, copy_first_sheet_to_workbook
+# =============================================================================
 
 def process_application(
     app_name: str,
@@ -566,6 +655,11 @@ def process_application(
         return copied, out_path
 
 
+# =============================================================================
+# ГЛАВНЫЙ ЦИКЛ — запрос пути, поиск шаблона, обработка групп, итоги, выбор 1/2
+# При масштабировании: структура main, выбор переименования, вывод в консоль
+# =============================================================================
+
 def main():
     _enable_ansi_windows()
     print("\n  === Отгрузочные таблицы ===")
@@ -639,9 +733,9 @@ def main():
         print(f"      счетов: {inv:>4}   ЭСД: {esd:>4}   GTD: {gtd:>4}")
     print("  " + "-" * 52)
     print(f"  Всего приложений: {len(by_app)}")
-    print(f"  Всего счетов (xlsx): {total_inv:>4}")
-    print(f"  Всего ЭСД (документов): {total_esd:>4}")
-    print(f"  Всего GTD (деклараций): {total_gtd:>4}")
+    print(f"  Всего инвойсов: {total_inv:>4}")
+    print(f"  Всего ЭСД: {total_esd:>4}")
+    print(f"  Всего ДТ: {total_gtd:>4}")
     print("  " + "=" * 52)
 
     # Выбор: закрыть без изменения имён или добавить диапазон счетов в имена
