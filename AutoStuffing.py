@@ -382,8 +382,8 @@ def copy_first_sheet_to_workbook(
 
 
 # =============================================================================
-# ЭСД И GTD — PDF в папках счетов: ЭСД — любой PDF, GTD — GTD_a_b_c.pdf
-# При масштабировании: _ESD_PATTERN, _GTD_PATTERN, _COL_ESD, _COL_GTD, _SKIP_SHEET_TITLES
+# ЭСД И GTD — ЭСД: PDF с ровно 4 дефисами; GTD: GTD_a_b_c.pdf
+# При масштабировании: _ESD_PATTERN, _ESD_HYPHEN_COUNT, _GTD_PATTERN, _COL_ESD, _COL_GTD
 # =============================================================================
 
 # Файлы "invoice N fcs.xlsx", "invoice N custom.xlsx" и т.п. — не копируем (любой текст после номера)
@@ -397,6 +397,7 @@ def _should_skip_invoice_file(path: Path) -> bool:
 
 _ESD_PATTERN = re.compile(r"^([\w-]+)\.pdf$", re.IGNORECASE)
 _GTD_PATTERN = re.compile(r"^GTD_(\d+)_(\d+)_(\d+)\.pdf$", re.IGNORECASE)
+_ESD_HYPHEN_COUNT = 4  # ЭСД — только PDF с ровно 4 дефисами в имени (3486.pdf — не ЭСД)
 # Колонки на листе Total: J = ЭСД, O = декларации (GTD)
 _COL_ESD = 10   # J
 _COL_GTD = 15   # O
@@ -423,9 +424,14 @@ def _get_sorted_invoice_numbers_from_wb(wb) -> list[str]:
     return _sort_invoice_numbers_as_int(names) if names else []
 
 
+def _is_esd_file(name: str) -> bool:
+    """PDF считается ЭСД только если в имени ровно 4 дефиса (3486.pdf — не ЭСД)."""
+    return bool(_ESD_PATTERN.match(name) and name.count("-") == _ESD_HYPHEN_COUNT)
+
+
 def _collect_esd_and_gtd_from_one_folder(folder: Path) -> tuple[list[str], list[str]]:
     """
-    Сканирует одну папку счёта: номера ЭСД (PDF не GTD_) и номера деклараций (GTD_a_b_c.pdf → a/b/c).
+    Сканирует одну папку счёта: номера ЭСД (PDF с 4 дефисами, не GTD_) и декларации (GTD_a_b_c.pdf).
     Возвращает (esd_list, gtd_list).
     """
     esd_list: list[str] = []
@@ -441,8 +447,7 @@ def _collect_esd_and_gtd_from_one_folder(folder: Path) -> tuple[list[str], list[
             if gtd_match:
                 gtd_list.append(f"{gtd_match.group(1)}/{gtd_match.group(2)}/{gtd_match.group(3)}")
             continue
-        esd_match = _ESD_PATTERN.match(name)
-        if esd_match:
+        if _is_esd_file(name):
             esd_list.append(name[:-4])
     return esd_list, gtd_list
 
@@ -532,7 +537,7 @@ def _count_esd_gtd_in_folders(folders: list[Path]) -> tuple[int, int]:
                 if _GTD_PATTERN.match(name):
                     gtd_count += 1
                 continue
-            if _ESD_PATTERN.match(name):
+            if _is_esd_file(name):
                 esd_count += 1
     return esd_count, gtd_count
 
