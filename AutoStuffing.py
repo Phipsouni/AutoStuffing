@@ -385,6 +385,15 @@ def copy_first_sheet_to_workbook(
 # При масштабировании: _ESD_PATTERN, _GTD_PATTERN, _COL_ESD, _COL_GTD, _SKIP_SHEET_TITLES
 # =============================================================================
 
+# Файлы "invoice N fcs.xlsx", "invoice N custom.xlsx" и т.п. — не копируем (любой текст после номера)
+_INVOICE_SKIP_PATTERN = re.compile(r"^invoice\s+\d+\s+.+\.xlsx$", re.IGNORECASE)
+
+
+def _should_skip_invoice_file(path: Path) -> bool:
+    """True — файл не копировать (invoice N fcs, invoice N custom и т.п.)."""
+    return bool(_INVOICE_SKIP_PATTERN.match(path.name))
+
+
 _ESD_PATTERN = re.compile(r"^([\w-]+)\.pdf$", re.IGNORECASE)
 _GTD_PATTERN = re.compile(r"^GTD_(\d+)_(\d+)_(\d+)\.pdf$", re.IGNORECASE)
 # Колонки на листе Total: J = ЭСД, O = декларации (GTD)
@@ -485,21 +494,24 @@ def _sort_invoice_numbers_as_int(numbers: list[str]) -> list[str]:
 
 
 def count_invoices_in_folders(folders: list[Path]) -> int:
-    """Количество xlsx-счетов в переданных папках."""
+    """Количество xlsx-счетов в переданных папках (без invoice N fcs/custom и т.п.)."""
     return sum(
         1 for folder in folders
         for p in folder.rglob("*.xlsx")
-        if not p.name.startswith("~$")
+        if not p.name.startswith("~$") and not _should_skip_invoice_file(p)
     )
 
 
 def _folders_without_xlsx(folders: list[Path]) -> list[Path]:
-    """Папки, в которых нет ни одного .xlsx (кроме ~$)."""
+    """Папки, в которых нет ни одного обрабатываемого .xlsx."""
     empty: list[Path] = []
     for folder in folders:
         if not folder.is_dir():
             continue
-        has_xlsx = any(not p.name.startswith("~$") for p in folder.rglob("*.xlsx"))
+        has_xlsx = any(
+            not p.name.startswith("~$") and not _should_skip_invoice_file(p)
+            for p in folder.rglob("*.xlsx")
+        )
         if not has_xlsx:
             empty.append(folder)
     return empty
@@ -587,7 +599,7 @@ def process_application(
             if not folder.is_dir():
                 continue
             for path in folder.rglob("*.xlsx"):
-                if path.name.startswith("~$"):
+                if path.name.startswith("~$") or _should_skip_invoice_file(path):
                     continue
                 try:
                     sheet_name = get_first_sheet_name(path)
@@ -621,7 +633,7 @@ def process_application(
             if not folder.is_dir():
                 continue
             for path in folder.rglob("*.xlsx"):
-                if path.name.startswith("~$"):
+                if path.name.startswith("~$") or _should_skip_invoice_file(path):
                     continue
                 all_paths.append((path, folder))
         # Сортируем по числовому значению номера счёта (1, 2, 3 … 10, 11)
